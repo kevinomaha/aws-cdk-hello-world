@@ -1,0 +1,259 @@
+Description: This stack includes resources needed to deploy AWS CDK apps into this environment
+Parameters:
+  TrustedAccounts:
+    Description: List of AWS accounts that are trusted to publish assets and deploy stacks to this environment
+    Default: ""
+    Type: CommaDelimitedList
+  CloudFormationExecutionPolicies:
+    Description: List of the ManagedPolicy ARN(s) to attach to the CloudFormation deployment role
+    Default: ""
+    Type: CommaDelimitedList
+  FileAssetsBucketName:
+    Description: The name of the S3 bucket used for file assets
+    Default: ""
+    Type: String
+  FileAssetsBucketKmsKeyId:
+    Description: Empty to create a new key (default), 'AWS_MANAGED_KEY' to use a managed S3 key, or the ID/ARN of an existing key.
+    Default: ""
+    Type: String
+  Qualifier:
+    Description: An identifier to distinguish multiple bootstrap stacks in the same environment
+    Default: hnb659fds
+    Type: String
+    AllowedPattern: "[A-Za-z0-9_-]{1,10}"
+  PublicAccessBlockConfiguration:
+    Description: Whether or not to enable S3 Staging Bucket Public Access Block Configuration
+    Default: "true"
+    Type: String
+    AllowedValues:
+      - "true"
+      - "false"
+Conditions:
+  HasTrustedAccounts:
+    Fn::Not:
+      - Fn::Equals:
+          - ""
+          - Fn::Join:
+              - ""
+              - Ref: TrustedAccounts
+  CreateNewKey:
+    Fn::Equals:
+      - ""
+      - Ref: FileAssetsBucketKmsKeyId
+  UseAwsManagedKey:
+    Fn::Equals:
+      - AWS_MANAGED_KEY
+      - Ref: FileAssetsBucketKmsKeyId
+  EnablePublicAccessBlockConfiguration:
+    Fn::Equals:
+      - "true"
+      - Ref: PublicAccessBlockConfiguration
+Resources:
+  FileAssetsBucketEncryptionKey:
+    Type: AWS::KMS::Key
+    Properties:
+      KeyPolicy:
+        Statement:
+          - Action:
+              - kms:Create*
+              - kms:Describe*
+              - kms:Enable*
+              - kms:List*
+              - kms:Put*
+              - kms:Update*
+              - kms:Revoke*
+              - kms:Disable*
+              - kms:Get*
+              - kms:Delete*
+              - kms:ScheduleKeyDeletion
+              - kms:CancelKeyDeletion
+              - kms:GenerateDataKey
+            Effect: Allow
+            Principal:
+              AWS:
+                Ref: AWS::AccountId
+            Resource: "*"
+          - Action:
+              - kms:Decrypt
+              - kms:DescribeKey
+              - kms:Encrypt
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+            Effect: Allow
+            Principal:
+              AWS: "*"
+            Resource: "*"
+            Condition:
+              StringEquals:
+                kms:CallerAccount:
+                  Ref: AWS::AccountId
+              StringLike:
+                kms:ViaService:
+                  - s3.*.amazonaws.com
+        Version: "2012-10-17"
+      Description:
+        Fn::Sub: Key for S3 bucket ${FileAssetsBucketName}
+  StagingBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName:
+        Ref: FileAssetsBucketName
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID:
+                Fn::If:
+                  - CreateNewKey
+                  - Fn::Sub: ${FileAssetsBucketEncryptionKey}
+                  - Fn::If:
+                      - UseAwsManagedKey
+                      - Fn::Sub: arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:alias/aws/s3
+                      - Ref: FileAssetsBucketKmsKeyId
+      PublicAccessBlockConfiguration:
+        Fn::If:
+          - EnablePublicAccessBlockConfiguration
+          - BlockPublicAcls: true
+            BlockPublicPolicy: true
+            IgnorePublicAcls: true
+            RestrictPublicBuckets: true
+          - Ref: AWS::NoValue
+    UpdateReplacePolicy: Retain
+    DeletionPolicy: Retain
+  StagingBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket:
+        Ref: StagingBucket
+      PolicyDocument:
+        Statement:
+          - Action: s3:*
+            Effect: Allow
+            Principal:
+              AWS:
+                Ref: AWS::AccountId
+            Resource:
+              - Fn::Sub: ${StagingBucket.Arn}
+              - Fn::Sub: ${StagingBucket.Arn}/*
+          - Action: s3:*
+            Effect: Allow
+            Principal:
+              AWS:
+                Fn::If:
+                  - HasTrustedAccounts
+                  - Ref: TrustedAccounts
+                  - Ref: AWS::AccountId
+            Resource:
+              - Fn::Sub: ${StagingBucket.Arn}
+              - Fn::Sub: ${StagingBucket.Arn}/*
+        Version: "2012-10-17"
+  FilePublishingRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              AWS:
+                Fn::If:
+                  - HasTrustedAccounts
+                  - Ref: TrustedAccounts
+                  - Ref: AWS::AccountId
+        Version: "2012-10-17"
+      RoleName:
+        Fn::Sub: cdk-${Qualifier}-file-publishing-role-${AWS::AccountId}-${AWS::Region}
+      Tags:
+        - Key: aws-cdk:bootstrap-role
+          Value: file-publishing
+  FilePublishingRoleDefaultPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Action:
+              - s3:GetObject*
+              - s3:GetBucket*
+              - s3:List*
+              - s3:DeleteObject*
+              - s3:PutObject*
+              - s3:Abort*
+            Effect: Allow
+            Resource:
+              - Fn::Sub: ${StagingBucket.Arn}
+              - Fn::Sub: ${StagingBucket.Arn}/*
+          - Action:
+              - kms:Decrypt
+              - kms:DescribeKey
+              - kms:Encrypt
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+            Effect: Allow
+            Resource:
+              Fn::If:
+                - CreateNewKey
+                - Fn::Sub: ${FileAssetsBucketEncryptionKey.Arn}
+                - Fn::If:
+                    - UseAwsManagedKey
+                    - Fn::Sub: arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:alias/aws/s3
+                    - Ref: FileAssetsBucketKmsKeyId
+        Version: "2012-10-17"
+      PolicyName: FilePublishingRoleDefaultPolicy
+      Roles:
+        - Ref: FilePublishingRole
+  CloudFormationExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service: cloudformation.amazonaws.com
+        Version: "2012-10-17"
+      ManagedPolicyArns:
+        Fn::If:
+          - HasTrustedAccounts
+          - Ref: CloudFormationExecutionPolicies
+          - - Fn::Sub: arn:${AWS::Partition}:iam::aws:policy/AdministratorAccess
+      RoleName:
+        Fn::Sub: cdk-${Qualifier}-cfn-exec-role-${AWS::AccountId}-${AWS::Region}
+      Tags:
+        - Key: aws-cdk:bootstrap-role
+          Value: execution
+  CdkBootstrapVersion:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Type: String
+      Name:
+        Fn::Sub: /cdk-bootstrap/${Qualifier}/version
+      Value: "14"
+Outputs:
+  BucketName:
+    Description: The name of the S3 bucket owned by the CDK toolkit stack
+    Value:
+      Fn::Sub: ${StagingBucket}
+  BucketDomainName:
+    Description: The domain name of the S3 bucket owned by the CDK toolkit stack
+    Value:
+      Fn::Sub: ${StagingBucket.DomainName}
+  FileAssetKeyArn:
+    Description: The ARN of the KMS key used to encrypt the asset bucket (if any)
+    Value:
+      Fn::If:
+        - CreateNewKey
+        - Fn::Sub: ${FileAssetsBucketEncryptionKey.Arn}
+        - Fn::If:
+            - UseAwsManagedKey
+            - Fn::Sub: arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:alias/aws/s3
+            - Ref: FileAssetsBucketKmsKeyId
+  CloudFormationExecutionRoleArn:
+    Description: The ARN of the role assumed by CloudFormation for stack deployments
+    Value:
+      Fn::Sub: ${CloudFormationExecutionRole.Arn}
+  FilePublishingRoleArn:
+    Description: The ARN of the role used for publishing assets to the S3 bucket
+    Value:
+      Fn::Sub: ${FilePublishingRole.Arn}

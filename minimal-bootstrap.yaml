@@ -1,0 +1,37 @@
+Description: Minimal CDK bootstrap resources
+Parameters:
+  Qualifier:
+    Type: String
+    Description: Qualifier for bootstrap resources
+    Default: hnb659fds
+  PublicAccessBlockConfiguration:
+    Type: String
+    Description: Whether to enable public access block configuration
+    Default: "true"
+    AllowedValues: ["true", "false"]
+  FileAssetsBucketKmsKeyId:
+    Type: String
+    Description: KMS key ID for bucket encryption
+    Default: ""
+Resources:
+  CdkBootstrapVersion:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Type: String
+      Name:
+        Fn::Sub: /cdk-bootstrap/${Qualifier}/version
+      Value: "14"
+  CloudFormationExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service: cloudformation.amazonaws.com
+        Version: "2012-10-17"
+      ManagedPolicyArns:
+        - Fn::Sub: arn:${AWS::Partition}:iam::aws:policy/AdministratorAccess
+      RoleName:
+        Fn::Sub: cdk-${Qualifier}-cfn-exec-role-${AWS::AccountId}-${AWS::Region}
